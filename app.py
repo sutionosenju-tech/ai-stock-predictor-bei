@@ -4,6 +4,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
 from datetime import datetime
 
 st.set_page_config(
@@ -12,6 +14,113 @@ st.set_page_config(
     layout="wide"
 )
 
+def ml_predict(ticker, horizon=5):
+    try:
+        data = yf.download(
+            ticker,
+            period="3y",
+            interval="1d",
+            auto_adjust=True,
+            progress=False
+        )
+
+        if data.empty:
+            return None
+
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
+        close = data["Close"]
+        high = data["High"]
+        low = data["Low"]
+        volume = data["Volume"]
+
+        features = pd.DataFrame(index=data.index)
+
+        features["return_1d"] = close.pct_change()
+        features["return_5d"] = close.pct_change(5)
+        features["return_10d"] = close.pct_change(10)
+        features["sma_5"] = close / close.rolling(5).mean() - 1
+        features["sma_20"] = close / close.rolling(20).mean() - 1
+        features["sma_50"] = close / close.rolling(50).mean() - 1
+
+        delta = close.diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        features["rsi"] = 100 - (100 / (1 + rs))
+
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        features["macd"] = (ema12 - ema26) / close
+
+        features["volatility"] = close.pct_change().rolling(10).std()
+        features["volume_change"] = volume.pct_change()
+        features["daily_range"] = (high - low) / close
+
+        future_close = close.shift(-horizon)
+        target = (future_close > close).astype(float)
+        target[future_close.isna()] = np.nan
+
+        dataset = features.copy()
+        dataset["target"] = target
+        dataset = dataset.replace([np.inf, -np.inf], np.nan).dropna()
+
+        if len(dataset) < 150:
+            return None
+
+        X = dataset.drop(columns=["target"])
+        y = dataset["target"].astype(int)
+
+        split = int(len(dataset) * 0.8)
+
+        if split < 50 or len(dataset) - split < 20:
+            return None
+
+        X_train, X_test = X.iloc[:split], X.iloc[split:]
+        y_train, y_test = y.iloc[:split], y.iloc[split:]
+
+        model = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=6,
+            min_samples_leaf=5,
+            class_weight="balanced",
+            random_state=42
+        )
+
+        model.fit(X_train, y_train)
+        accuracy = accuracy_score(y_test, model.predict(X_test))
+
+        model.fit(X, y)
+
+        latest = features.replace(
+            [np.inf, -np.inf], np.nan
+        ).dropna().iloc[[-1]]
+
+        probabilities = model.predict_proba(latest)[0]
+        classes = list(model.classes_)
+
+        up_probability = (
+            probabilities[classes.index(1)]
+            if 1 in classes else 0
+        )
+
+        down_probability = (
+            probabilities[classes.index(0)]
+            if 0 in classes else 0
+        )
+
+        return {
+            "direction": "NAIK" if up_probability >= 0.5 else "TURUN",
+            "up_probability": up_probability * 100,
+            "down_probability": down_probability * 100,
+            "accuracy": accuracy * 100,
+            "horizon": horizon
+        }
+
+    except Exception:
+        return None
+        
 WATCHLIST = [
     "BBCA", "BBRI", "BMRI", "BBNI", "BRIS",
     "TLKM", "ASII", "ANTM", "INCO", "MDKA",
