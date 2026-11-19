@@ -365,7 +365,50 @@ else:
                     a.metric("RSI", f'{result["rsi"]:.2f}')
                     b.metric("SMA 20", rupiah(result["sma20"]))
                     c.metric("SMA 50", rupiah(result["sma50"]))
+                    
+                    st.subheader("🤖 PREDIKSI AI MACHINE LEARNING")
 
+                    horizon = st.selectbox(
+                        "Prediksi untuk berapa hari bursa?",
+                        [1, 3, 5],
+                        index=2
+                    )
+
+                    with st.spinner("AI sedang mempelajari data historis saham..."):
+                        prediction = ml_predict(ticker, horizon)
+
+                    if prediction:
+                        p1, p2, p3 = st.columns(3)
+
+                        p1.metric(
+                            "Arah Prediksi",
+                            prediction["direction"]
+                        )
+                        p2.metric(
+                            "Peluang Naik",
+                            f'{prediction["up_probability"]:.1f}%'
+                        )
+                        p3.metric(
+                            "Peluang Turun",
+                            f'{prediction["down_probability"]:.1f}%'
+                        )
+
+                        st.metric(
+                            "Akurasi Pengujian Historis",
+                            f'{prediction["accuracy"]:.1f}%'
+                        )
+
+                        st.caption(
+                            f"Perkiraan arah untuk {horizon} hari bursa. "
+                            "Akurasi adalah hasil pengujian historis, "
+                            "bukan jaminan prediksi mendatang."
+                        )
+                    else:
+                        st.warning(
+                            "Prediksi AI belum tersedia. "
+                            "Periksa data historis saham."
+                        )
+                        
                     st.subheader("Rencana Harga Indikatif")
                     a, b, c = st.columns(3)
                     a.metric("Area Entri", rupiah(result["entry"]))
