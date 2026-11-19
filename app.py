@@ -1,193 +1,281 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime, timezone
+from datetime import datetime
 
-st.set_page_config(page_title="AI Stock Predictor BEI", page_icon="📈", layout="wide")
+st.set_page_config(
+    page_title="AI Stock Predictor BEI V2",
+    page_icon="📈",
+    layout="wide"
+)
 
-GLOBAL_ASSETS = {
-    "S&P 500": "^GSPC",
-    "Nasdaq": "^IXIC",
-    "Nikkei 225": "^N225",
-    "Hang Seng": "^HSI",
-    "USD/IDR": "IDR=X",
-    "Emas": "GC=F",
-    "Minyak WTI": "CL=F",
-}
+WATCHLIST = [
+    "BBCA", "BBRI", "BMRI", "BBNI", "BRIS",
+    "TLKM", "ASII", "ANTM", "INCO", "MDKA",
+    "ADRO", "PTBA", "ITMG", "UNTR", "ICBP",
+    "INDF", "AMRT", "CPIN", "GOTO", "ACES",
+    "UNVR", "KLBF", "PGAS", "MEDC", "SMGR"
+]
 
-@st.cache_data(ttl=900, show_spinner=False)
-def load_history(ticker: str, period: str = "1y"):
-    df = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df = df.rename(columns=str.title)
-    return df.dropna(subset=["Close"])
+st.title("📈 AI STOCK PREDICTOR BEI")
+st.caption("VERSION 2 | Auto Scanner + Manual Analysis")
 
-def add_indicators(df):
-    d = df.copy()
-    close = d["Close"]
-    d["SMA20"] = close.rolling(20).mean()
-    d["SMA50"] = close.rolling(50).mean()
-    d["EMA12"] = close.ewm(span=12, adjust=False).mean()
-    d["EMA26"] = close.ewm(span=26, adjust=False).mean()
-    d["MACD"] = d["EMA12"] - d["EMA26"]
-    d["MACD_Signal"] = d["MACD"].ewm(span=9, adjust=False).mean()
+st.info(
+    "Analisis berbasis indikator teknikal dan konteks pasar global. "
+    "Bukan jaminan keuntungan atau rekomendasi investasi."
+)
+
+@st.cache_data(ttl=300)
+def get_data(ticker, period="6mo"):
+    return yf.download(
+        ticker + ".JK",
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        progress=False
+    )
+
+def analyze(ticker):
+    df = get_data(ticker)
+
+    if df is None or df.empty or len(df) < 55:
+        return None
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    close = df["Close"].squeeze()
+    high = df["High"].squeeze()
+    low = df["Low"].squeeze()
+    volume = df["Volume"].squeeze()
+
+    df["SMA20"] = close.rolling(20).mean()
+    df["SMA50"] = close.rolling(50).mean()
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df["MACD"] = ema12 - ema26
+    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+
     delta = close.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
-    d["RSI"] = 100 - (100 / (1 + rs))
-    prev = d["Close"].shift(1)
-    tr = pd.concat([
-        d["High"] - d["Low"],
-        (d["High"] - prev).abs(),
-        (d["Low"] - prev).abs()
-    ], axis=1).max(axis=1)
-    d["ATR"] = tr.rolling(14).mean()
-    d["BB_Mid"] = close.rolling(20).mean()
-    std = close.rolling(20).std()
-    d["BB_Upper"] = d["BB_Mid"] + 2 * std
-    d["BB_Lower"] = d["BB_Mid"] - 2 * std
-    d["Vol_Avg20"] = d["Volume"].rolling(20).mean()
-    return d
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-def analyze(d):
-    last = d.iloc[-1]
-    score, reasons = 0, []
-    if pd.notna(last["SMA20"]) and last["Close"] > last["SMA20"]:
-        score += 1; reasons.append("Harga di atas SMA20 (momentum jangka pendek positif).")
-    else:
-        score -= 1; reasons.append("Harga di bawah SMA20 (momentum jangka pendek lemah).")
-    if pd.notna(last["SMA50"]) and last["Close"] > last["SMA50"]:
-        score += 1; reasons.append("Harga di atas SMA50 (tren menengah positif).")
-    else:
-        score -= 1; reasons.append("Harga di bawah SMA50 (tren menengah lemah).")
-    if pd.notna(last["MACD"]) and pd.notna(last["MACD_Signal"]):
-        if last["MACD"] > last["MACD_Signal"]:
-            score += 1; reasons.append("MACD berada di atas garis sinyal.")
-        else:
-            score -= 1; reasons.append("MACD berada di bawah garis sinyal.")
-    if pd.notna(last["RSI"]):
-        if 50 <= last["RSI"] <= 68:
-            score += 1; reasons.append("RSI menunjukkan momentum positif tanpa kondisi terlalu jenuh beli.")
-        elif last["RSI"] > 75:
-            score -= 1; reasons.append("RSI tinggi: risiko kondisi jenuh beli.")
-        elif last["RSI"] < 30:
-            reasons.append("RSI rendah: potensi pantulan ada, tetapi tren turun tetap perlu diwaspadai.")
-        else:
-            reasons.append("RSI belum menunjukkan momentum beli yang kuat.")
-    if pd.notna(last["Vol_Avg20"]) and last["Vol_Avg20"] > 0:
-        if last["Volume"] > last["Vol_Avg20"] * 1.2 and last["Close"] > last["Open"]:
-            score += 1; reasons.append("Volume di atas rata-rata disertai candle naik.")
-    if score >= 3:
+    df["ATR"] = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1).rolling(14).mean()
+
+    last = df.iloc[-1]
+    price = float(close.iloc[-1])
+    score = 0
+
+    if price > last["SMA20"]:
+        score += 1
+    if last["SMA20"] > last["SMA50"]:
+        score += 1
+    if last["MACD"] > last["Signal"]:
+        score += 1
+    if 50 <= last["RSI"] <= 70:
+        score += 1
+    if volume.iloc[-1] > volume.rolling(20).mean().iloc[-1]:
+        score += 1
+
+    if score >= 4:
         signal = "BUY"
-    elif score <= -2:
-        signal = "SELL / AVOID"
+    elif score <= 1:
+        signal = "SELL"
     else:
-        signal = "HOLD / WAIT"
-    price = float(last["Close"])
-    atr = float(last["ATR"]) if pd.notna(last["ATR"]) else price * 0.03
+        signal = "HOLD"
+
+    atr = float(last["ATR"])
     return {
-        "signal": signal, "score": score, "price": price,
-        "entry_low": price - 0.25 * atr, "entry_high": price + 0.10 * atr,
-        "stop": price - 1.5 * atr, "target1": price + 2 * atr,
-        "target2": price + 3 * atr, "rsi": float(last["RSI"]) if pd.notna(last["RSI"]) else np.nan,
-        "reasons": reasons
+        "ticker": ticker,
+        "price": price,
+        "signal": signal,
+        "score": score,
+        "rsi": float(last["RSI"]),
+        "sma20": float(last["SMA20"]),
+        "sma50": float(last["SMA50"]),
+        "atr": atr,
+        "entry": price,
+        "stop": price - (1.5 * atr),
+        "target": price + (3 * atr),
+        "data": df
     }
 
-st.title("📈 AI Stock Predictor BEI")
-st.caption("Edisi gratis • Analisis teknikal berbasis aturan • Bukan rekomendasi investasi")
-with st.sidebar:
-    st.header("Pengaturan")
-    symbol = st.text_input("Kode saham BEI", value="BBCA").strip().upper()
-    period_label = st.selectbox("Riwayat data", ["6 bulan", "1 tahun", "2 tahun", "5 tahun"], index=1)
-    period = {"6 bulan":"6mo", "1 tahun":"1y", "2 tahun":"2y", "5 tahun":"5y"}[period_label]
-    st.caption("Masukkan kode saja, misalnya BBCA. Aplikasi menambahkan .JK.")
-    refresh = st.button("Muat ulang data")
+def rupiah(value):
+    return "Rp {:,.0f}".format(value)
 
-if refresh:
-    st.cache_data.clear()
+mode = st.sidebar.radio(
+    "PILIH MODE ANALISIS",
+    ["AUTO SCANNER", "MANUAL ANALYSIS"]
+)
 
-ticker = symbol if "." in symbol else f"{symbol}.JK"
-with st.spinner(f"Mengambil data {ticker}..."):
-    raw = load_history(ticker, period)
+st.sidebar.caption("Data: Yahoo Finance | Dapat tertunda")
 
-if raw.empty or len(raw) < 60:
-    st.error("Data saham tidak ditemukan atau belum cukup untuk analisis. Periksa kode saham dan coba lagi nanti.")
-    st.info("Sumber data menggunakan Yahoo Finance melalui yfinance. Ketersediaan dan ketepatan waktu data tidak dijamin.")
-    st.stop()
+# KONTEKS PASAR GLOBAL
+st.subheader("🌍 KONTEKS PASAR GLOBAL")
 
-data = add_indicators(raw)
-result = analyze(data)
-last_date = data.index[-1]
-age_days = (pd.Timestamp.now(tz=last_date.tz) - last_date).days if last_date.tz else (pd.Timestamp.now().tz_localize(None) - last_date).days
+global_symbols = {
+    "S&P 500": "^GSPC",
+    "NASDAQ": "^IXIC",
+    "NIKKEI": "^N225",
+    "HANG SENG": "^HSI",
+    "USD/IDR": "IDR=X",
+    "GOLD": "GC=F",
+    "WTI OIL": "CL=F"
+}
 
-c1,c2,c3,c4 = st.columns(4)
-c1.metric("Harga terakhir", f"Rp {result['price']:,.0f}")
-c2.metric("Sinyal sistem", result["signal"])
-c3.metric("RSI 14", f"{result['rsi']:.1f}" if pd.notna(result["rsi"]) else "—")
-c4.metric("Skor indikator", f"{result['score']}/5")
-
-st.caption(f"Ticker: {ticker} • Tanggal candle terakhir: {last_date.strftime('%d-%m-%Y')} • Perkiraan umur data: {age_days} hari • Cache data: 15 menit")
-if age_days > 4:
-    st.warning("Data terakhir tampak lebih lama dari 4 hari kalender. Jangan gunakan sinyal ini untuk keputusan transaksi sebelum memverifikasi harga terbaru di aplikasi sekuritas.")
-
-st.subheader("Rencana transaksi indikatif")
-p1,p2,p3,p4 = st.columns(4)
-p1.metric("Area entry", f"Rp {result['entry_low']:,.0f} – {result['entry_high']:,.0f}")
-p2.metric("Stop loss", f"Rp {result['stop']:,.0f}")
-p3.metric("Target 1", f"Rp {result['target1']:,.0f}")
-p4.metric("Target 2", f"Rp {result['target2']:,.0f}")
-st.caption("Level dihitung dari ATR historis, bukan jaminan akan tersentuh. Sesuaikan dengan fraksi harga, likuiditas, biaya transaksi, dan toleransi risiko.")
-
-st.subheader("Grafik harga dan moving average")
-fig = go.Figure()
-fig.add_trace(go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Harga"))
-fig.add_trace(go.Scatter(x=data.index, y=data["SMA20"], name="SMA20", line=dict(width=1.5)))
-fig.add_trace(go.Scatter(x=data.index, y=data["SMA50"], name="SMA50", line=dict(width=1.5)))
-fig.update_layout(height=520, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=30,b=10))
-st.plotly_chart(fig, use_container_width=True)
-
-left,right = st.columns(2)
-with left:
-    st.subheader("Alasan sinyal")
-    for reason in result["reasons"]:
-        st.write("• " + reason)
-with right:
-    st.subheader("Momentum")
-    mom = go.Figure()
-    mom.add_trace(go.Scatter(x=data.index, y=data["RSI"], name="RSI"))
-    mom.add_hline(y=70, line_dash="dash")
-    mom.add_hline(y=30, line_dash="dash")
-    mom.update_layout(height=280, yaxis_range=[0,100], margin=dict(l=10,r=10,t=20,b=10))
-    st.plotly_chart(mom, use_container_width=True)
-
-st.subheader("Kondisi pasar global")
-cols = st.columns(4)
-for i, (name, code) in enumerate(GLOBAL_ASSETS.items()):
+global_data = []
+for name, symbol in global_symbols.items():
     try:
-        g = load_history(code, "3mo")
-        if not g.empty and len(g) >= 2:
-            latest = float(g["Close"].iloc[-1])
-            prev = float(g["Close"].iloc[-2])
-            change = (latest / prev - 1) * 100 if prev else 0
-            cols[i % 4].metric(name, f"{latest:,.2f}", f"{change:+.2f}%")
-        else:
-            cols[i % 4].metric(name, "Data tidak tersedia")
+        data = yf.download(
+            symbol, period="5d", interval="1d",
+            progress=False, auto_adjust=True
+        )
+        if not data.empty:
+            price = float(data["Close"].iloc[-1].squeeze())
+            global_data.append((name, price))
     except Exception:
-        cols[i % 4].metric(name, "Gagal dimuat")
+        pass
 
-st.subheader("Data historis terbaru")
-st.dataframe(data[["Open","High","Low","Close","Volume","RSI","MACD","SMA20","SMA50"]].tail(15), use_container_width=True)
+if global_data:
+    cols = st.columns(4)
+    for i, (name, price) in enumerate(global_data):
+        cols[i % 4].metric(name, f"{price:,.2f}")
+else:
+    st.warning("Data pasar global belum tersedia.")
 
-with st.expander("Penting: batasan dan penggunaan yang aman"):
-    st.markdown("""
-    - Versi awal ini **belum menggunakan model machine learning**. Istilah AI Stock Predictor adalah nama produk; sinyal saat ini berasal dari aturan indikator teknikal yang transparan.
-    - Data Yahoo Finance/yfinance dapat tertunda, tidak lengkap, berubah, atau gagal diakses. Bukan feed resmi BEI dan bukan data tick real-time.
-    - Indeks global ditampilkan sebagai konteks, belum digabungkan ke skor sinyal saham. Integrasi sentimen berita dan model prediksi akan menjadi tahap pengembangan berikutnya.
-    - Uji strategi dengan data historis (backtesting) dan akun simulasi sebelum mempertimbangkan transaksi nyata.
-    - Tidak ada sinyal yang menjamin keuntungan. Keputusan akhir dan risiko tetap pada pengguna.
-    """)
-st.caption("Dibuat untuk edukasi dan riset. Periksa ulang harga, aksi korporasi, likuiditas, dan informasi emiten melalui sumber resmi sebelum bertransaksi.")
+st.divider()
+
+# AUTO SCANNER
+if mode == "AUTO SCANNER":
+    st.subheader("🔎 AUTO SCANNER SAHAM BEI")
+    st.write("Memindai 25 saham pilihan secara otomatis.")
+
+    if st.button("🚀 MULAI SCAN SAHAM", type="primary"):
+        results = []
+        progress = st.progress(0)
+        status = st.empty()
+
+        for i, ticker in enumerate(WATCHLIST):
+            status.write(f"Memeriksa {ticker}...")
+            try:
+                result = analyze(ticker)
+                if result:
+                    results.append({
+                        "Kode": ticker,
+                        "Harga": result["price"],
+                        "Sinyal": result["signal"],
+                        "Skor": result["score"],
+                        "RSI": round(result["rsi"], 2),
+                        "Potensi Target": result["target"]
+                    })
+            except Exception:
+                pass
+
+            progress.progress((i + 1) / len(WATCHLIST))
+
+        status.success("Pemindaian selesai!")
+
+        if results:
+            result_df = pd.DataFrame(results)
+            result_df = result_df.sort_values(
+                "Skor", ascending=False
+            )
+            st.dataframe(result_df, use_container_width=True)
+
+            st.download_button(
+                "📥 Download Hasil Scanner CSV",
+                result_df.to_csv(index=False),
+                file_name="hasil_scanner_saham.csv",
+                mime="text/csv"
+            )
+
+            st.subheader("Saham dengan Skor Tertinggi")
+            st.dataframe(
+                result_df.head(5),
+                use_container_width=True
+            )
+        else:
+            st.error("Data saham belum berhasil diperoleh.")
+
+# MANUAL ANALYSIS
+else:
+    st.subheader("📊 ANALISIS SAHAM MANUAL")
+
+    ticker = st.text_input(
+        "Masukkan kode saham BEI",
+        value="BBCA"
+    ).upper().strip()
+
+    if st.button("ANALISIS SAHAM", type="primary"):
+        with st.spinner("Menganalisis saham..."):
+            try:
+                result = analyze(ticker)
+
+                if result is None:
+                    st.error("Data tidak tersedia atau belum cukup.")
+                else:
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Harga Terakhir", rupiah(result["price"]))
+                    c2.metric("Sinyal", result["signal"])
+                    c3.metric("Skor Teknikal", f'{result["score"]}/5')
+
+                    st.subheader("Grafik Harga dan Moving Average")
+
+                    df = result["data"]
+                    fig = go.Figure()
+                    fig.add_trace(go.Candlestick(
+                        x=df.index,
+                        open=df["Open"],
+                        high=df["High"],
+                        low=df["Low"],
+                        close=df["Close"],
+                        name="Harga"
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=df.index, y=df["SMA20"],
+                        name="SMA 20"
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=df.index, y=df["SMA50"],
+                        name="SMA 50"
+                    ))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.subheader("Indikator Teknikal")
+                    a, b, c = st.columns(3)
+                    a.metric("RSI", f'{result["rsi"]:.2f}')
+                    b.metric("SMA 20", rupiah(result["sma20"]))
+                    c.metric("SMA 50", rupiah(result["sma50"]))
+
+                    st.subheader("Rencana Harga Indikatif")
+                    a, b, c = st.columns(3)
+                    a.metric("Area Entri", rupiah(result["entry"]))
+                    b.metric("Stop Loss", rupiah(result["stop"]))
+                    c.metric("Target", rupiah(result["target"]))
+
+                    st.caption(
+                        "Level dihitung menggunakan ATR historis, "
+                        "bukan prediksi harga yang pasti."
+                    )
+
+            except Exception as e:
+                st.error(f"Terjadi kesalahan: {e}")
+
+st.divider()
+st.caption(
+    "AI Stock Predictor BEI V2 | "
+    "Analisis teknikal berbasis aturan, bukan machine learning. "
+    "Data Yahoo Finance dapat tertunda atau tidak lengkap. "
+    "Bukan nasihat investasi."
+)
+st.caption("Diperbarui: " + datetime.now().strftime("%d-%m-%Y %H:%M"))
