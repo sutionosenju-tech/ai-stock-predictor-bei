@@ -268,8 +268,25 @@ st.divider()
 if mode == "AUTO SCANNER":
     st.subheader("🔎 AUTO SCANNER SAHAM BEI")
     st.write("Memindai 25 saham pilihan secara otomatis.")
+    
+    ml_horizon = st.selectbox(
+        "Jangka waktu prediksi AI",
+        [1, 3, 5],
+        index=2,
+        key="scanner_horizon"
+    )
 
+    min_probability = st.slider(
+        "Minimal peluang naik (%)",
+        min_value=50,
+        max_value=90,
+        value=60,
+        step=5,
+        key="scanner_probability"
+    )
+    
     if st.button("🚀 MULAI SCAN SAHAM", type="primary"):
+        
         results = []
         progress = st.progress(0)
         status = st.empty()
@@ -278,6 +295,8 @@ if mode == "AUTO SCANNER":
             status.write(f"Memeriksa {ticker}...")
             try:
                 result = analyze(ticker)
+                prediction = ml_predict(ticker, ml_horizon)
+
                 if result:
                     results.append({
                         "Kode": ticker,
@@ -285,22 +304,48 @@ if mode == "AUTO SCANNER":
                         "Sinyal": result["signal"],
                         "Skor": result["score"],
                         "RSI": round(result["rsi"], 2),
-                        "Potensi Target": result["target"]
+                        "Potensi Target": result["target"],
+                        "Peluang Naik (%)": round(prediction["up_probability"], 1) if prediction else None,
+                        "Peluang Turun (%)": round(prediction["down_probability"], 1) if prediction else None,
+                        "Arah AI": prediction["direction"] if prediction else "Belum tersedia",
+                        "Akurasi Model (%)": round(prediction["accuracy"], 1) if prediction else None
                     })
-            except Exception:
-                pass
+
+            except Exception as e:
+                status.write(f"Melewati {ticker}: {e}")
 
             progress.progress((i + 1) / len(WATCHLIST))
 
         status.success("Pemindaian selesai!")
-
+        
         if results:
             result_df = pd.DataFrame(results)
+            
             result_df = result_df.sort_values(
-                "Skor", ascending=False
+                ["Peluang Naik (%)", "Skor"],
+                ascending=[False, False],
+                na_position="last"
             )
+            
             st.dataframe(result_df, use_container_width=True)
+            
+            st.subheader("⭐ KANDIDAT SAHAM PILIHAN AI")
 
+            candidates = result_df[
+                (result_df["Peluang Naik (%)"] >= min_probability) &
+                (result_df["Sinyal"].isin(["BUY", "HOLD"]))
+            ]
+
+            if not candidates.empty:
+                st.dataframe(
+                    candidates,
+                    use_container_width=True
+                )
+            else:
+                st.info(
+                    "Belum ada saham yang memenuhi kriteria peluang naik."
+                )
+                
             st.download_button(
                 "📥 Download Hasil Scanner CSV",
                 result_df.to_csv(index=False),
